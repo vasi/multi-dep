@@ -50,7 +50,9 @@ class Package
     @fields["Status"].end_with?("installed")
   end
   def requires
-    @requires ||= DepAlt.all(@fields["Depends"])
+    @requires ||= ['Depends', 'Pre-Depends', 'Recommends'].flat_map do |f|
+      DepAlt.all(@fields[f])
+    end
   end
 
   def inspect
@@ -70,4 +72,4 @@ class Package
 end
 
 packages = Package.parse
-pp packages['apache2-bin'].requires
+pp packages[ARGV.shift].requires
