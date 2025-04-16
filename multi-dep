@@ -2,11 +2,60 @@
 require 'set'
 
 class DepSpec
-  attr_reader :name, :op, :version
+  attr_reader :name, :op, :version, :version_key
 
   def initialize(spec)
     md = /^(\S+)(?: \(([><=]+) (\S+)\))?/.match(spec)
     @name, @op, @version = *md.captures
+    @version_key = DepSpec.version_key(@version) if @version
+  end
+
+  def self.vsego(c)
+    return 0 if c == '~'
+    return 2 if /[a-zA-Z]/.match?(c)
+    3
+  end
+
+  def self.vsegkey(v)
+    k = v.chars.flat_map {|c| [vsego(c), c]}
+    k << 1
+  end
+
+  def self.vpartkey(v)
+    k = []
+    until v.empty?
+      s, v = /^(\D*)(.*)/.match(v).captures
+      k.concat(vsegkey(s))
+      s, v = /^(\d*)(.*)/.match(v).captures
+      k. << s.to_i
+    end
+    k
+  end
+  
+  def self.vsplit(v)
+    epoch, v = v.split(':')
+    epoch, v = 0, epoch if v.nil?
+    v, _, rev = v.rpartition('-')
+    rev = '0' if rev.empty?
+    [epoch.to_i, v, rev]
+  end
+
+  def self.version_key(v)
+    epoch, vers, rev = vsplit(v)
+    [epoch, vpartkey(vers), vpartkey(rev)]
+  end
+
+  def version_match(pkg)
+    return true if @op.nil?
+    return false if pkg.version.nil?
+    o = (pkg.version_key <=> version_key)
+    case op
+    when '='; o == 0
+    when '<<'; o < 0
+    when '<='; o <= 0
+    when '>'; o > 0
+    when '>='; o >= 0
+    end
   end
 end
 
@@ -24,18 +73,29 @@ class DepAlt
     @@uniq[spec] ||= DepAlt.new(spec, for_package)
   end
 
-  def self.all(spec, &block)
+  def self.split(spec)
     return [] if spec.nil?
-    block ||= ->(s) { DepSpec.new(s) }
-    spec.split(/\s*,\s*/).map {|s| block[s]}
+    spec.split(/\s*,\s*/)
   end
 
-  def self.all_alts(spec, for_package)
-    all(spec) {|s| uniq(s, for_package)}
+  def self.deps(spec, for_package)
+    split(spec).map {|s| uniq(s, for_package)}
   end
 
   def to_s
     @text
+  end
+end
+
+class Provide
+  attr_reader :name, :version, :source
+  def initialize(spec, for_package)
+    @spec = DepSpec.new(spec)
+    @name, @version = @spec.name, @spec.version
+    @source = for_package
+  end
+  def version_key
+    DepSpec.version_key(@version)
   end
 end
 
@@ -69,14 +129,20 @@ class Package
   def requires
     # TODO: allow opting-out of Recommends. Or even adding Suggests!
     @requires ||= ['Depends', 'Pre-Depends', 'Recommends'].flat_map do |f|
-      DepAlt.all_alts(@fields[f], name)
+      DepAlt.deps(@fields[f], name)
     end
   end
   def provides
-    @provides ||= DepAlt.all(@fields["Provides"])
+    @provides ||= DepAlt.split(@fields["Provides"]).map {|s| Provide.new(s, self)}
   end
   def inspect
     "<Package name=#{name} version=#{version}>"
+  end
+  def version_key
+    @vkey ||= DepSpec.version_key(version)
+  end
+  def source
+    self
   end
 
   def self.parse
@@ -113,7 +179,7 @@ class MultiFinder
     @packages.each_value do |pkg|
       @providers[pkg.name] << pkg
       pkg.provides.each do |prov|
-        @providers[prov.name] << pkg
+        @providers[prov.name] << prov
       end
     end
   end
@@ -131,8 +197,11 @@ class MultiFinder
   def what_satisfies(alt)
     sats = Set.new
     alt.deps.each do |dep|
-      # TODO: handle versions
-      sats.merge(@providers[dep.name])
+      @providers[dep.name].each do |prov|
+        if dep.version_match(prov)
+          sats << prov.source
+        end
+      end
     end
     sats
   end
