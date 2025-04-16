@@ -11,14 +11,19 @@ end
 
 class DepAlt
   attr_reader :deps
+  @@uniq = {}
 
   def initialize(spec)
     @deps = spec.split(/\s*\|\s*/).map {|s| DepSpec.new(s)}
   end
 
+  def self.uniq(spec)
+    @@uniq[spec] ||= DepAlt.new(spec)
+  end
+
   def self.all(spec)
     return [] if spec.nil?
-    spec.split(/\s*,\s*/).map {|s| DepAlt.new(s)}
+    spec.split(/\s*,\s*/).map {|s| self.uniq(s)}
   end
 end
 
@@ -74,4 +79,4 @@ class Package
 end
 
 packages = Package.parse
-pp packages[ARGV.shift].provides
+pp packages[ARGV.shift].requires
