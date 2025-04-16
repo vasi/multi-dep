@@ -1,4 +1,5 @@
 #!/usr/bin/env ruby
+require 'set'
 
 class DepSpec
   attr_reader :name, :op, :version
