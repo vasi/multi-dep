@@ -10,20 +10,31 @@ class DepSpec
 end
 
 class DepAlt
-  attr_reader :deps
+  attr_reader :deps, :for_package
   @@uniq = {}
 
-  def initialize(spec)
+  def initialize(spec, for_package)
     @deps = spec.split(/\s*\|\s*/).map {|s| DepSpec.new(s)}
+    @text = spec
+    @for_package = for_package
   end
 
-  def self.uniq(spec)
-    @@uniq[spec] ||= DepAlt.new(spec)
+  def self.uniq(spec, for_package)
+    @@uniq[spec] ||= DepAlt.new(spec, for_package)
   end
 
-  def self.all(spec)
+  def self.all(spec, &block)
     return [] if spec.nil?
-    spec.split(/\s*,\s*/).map {|s| self.uniq(s)}
+    block ||= ->(s) { DepSpec.new(s) }
+    spec.split(/\s*,\s*/).map {|s| block[s]}
+  end
+
+  def self.all_alts(spec, for_package)
+    all(spec) {|s| uniq(s, for_package)}
+  end
+
+  def to_s
+    @text
   end
 end
 
@@ -34,7 +45,7 @@ class Package
     while line = io.readline
       line.chomp!
       return if line.empty?
-      if md = /^(\S+): (.*)/.match(line)
+      if md = /^(\S+): ?(.*)/.match(line)
         cur = md[1]
         @fields[cur] = md[2]
       elsif md = /^\s+(.*)/.match(line)
@@ -55,8 +66,9 @@ class Package
     @fields["Status"].end_with?("installed")
   end
   def requires
+    # TODO: allow opting-out of Recommends. Or even adding Suggests!
     @requires ||= ['Depends', 'Pre-Depends', 'Recommends'].flat_map do |f|
-      DepAlt.all(@fields[f])
+      DepAlt.all_alts(@fields[f], name)
     end
   end
   def provides
@@ -78,5 +90,97 @@ class Package
   end
 end
 
-packages = Package.parse
-pp packages[ARGV.shift].requires
+class MultiFinder
+  def initialize
+    @packages = Package.parse
+    trigger_requires_in_order
+    find_providers
+    find_satisfiers
+    find_revdeps
+    find_multis
+  end
+
+  def trigger_requires_in_order
+    @packages.keys.sort.each do |k|
+      @packages[k].requires
+    end
+  end
+
+  # Map names to all packages that provide that name
+  def find_providers
+    @providers = Hash.new {|h, k| h[k] = []}
+    @packages.each_value do |pkg|
+      @providers[pkg.name] << pkg
+      pkg.provides.each do |prov|
+        @providers[prov.name] << pkg
+      end
+    end
+  end
+
+  # Map AltDeps to all packages that satisfy the dep (any alternative)
+  def find_satisfiers
+    @satisfiers = {}
+    @packages.each_value do |pkg|
+      pkg.requires.each do |alt|
+        @satisfiers[alt] ||= what_satisfies(alt)
+      end
+    end
+  end
+
+  def what_satisfies(alt)
+    sats = Set.new
+    alt.deps.each do |dep|
+      # TODO: handle versions
+      sats.merge(@providers[dep.name])
+    end
+    sats
+  end
+
+  # Map packages to all AltDeps that they may satisfy
+  def find_revdeps
+    @revdeps = Hash.new {|h, k| h[k] = []}
+    @satisfiers.each do |alt, sats|
+      sats.each do |pkg|
+        @revdeps[pkg] << alt
+      end
+    end
+  end
+
+  # Find each AltDep with multiple options
+  def find_multis
+    # Note: Only look at packages that have something depending on them in any way,
+    # since there are other ways to deal with no-longer-needed packages.
+    to_examine = @revdeps
+
+    @multi = Hash.new {|h, k| h[k] = Set.new}
+    to_examine.each do |pkg, alts|
+      if alts.all? {|a| @satisfiers[a].size > 1}
+        alts.each {|a| @multi[a] << pkg}
+      end
+    end
+  end
+
+  def score_alt(alt, packages)
+    # Prefer showing alts with as many packages as possible, then as few alts, then alpha
+    removable_count = (@multi[alt] & packages).size
+    alt_count = alt.deps.size
+    [-removable_count, alt_count, alt.for_package]
+  end
+
+  def print_multi
+    packages = @multi.values.inject(Set.new) {|h,pkgs| h.merge(pkgs)}
+    until packages.empty?
+      # Pick the best alt to print
+      alt, pkgs = @multi.min_by {|k,v| score_alt(k, packages)}
+
+      names = (pkgs & packages).map(&:name).sort
+      puts "From #{alt.for_package}: #{alt}"
+      names.each {|name| puts "  #{name}"}
+      
+      packages -= pkgs
+    end
+  end
+end
+
+mf = MultiFinder.new
+mf.print_multi
