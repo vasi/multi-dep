@@ -54,7 +54,9 @@ class Package
       DepAlt.all(@fields[f])
     end
   end
-
+  def provides
+    @provides ||= DepAlt.all(@fields["Provides"])
+  end
   def inspect
     "<Package name=#{name} version=#{version}>"
   end
@@ -72,4 +74,4 @@ class Package
 end
 
 packages = Package.parse
-pp packages[ARGV.shift].requires
+pp packages[ARGV.shift].provides
